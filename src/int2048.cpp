@@ -1,469 +1,274 @@
 #include "include/int2048.h"
-#include <algorithm>
-#include <cassert>
 
 namespace sjtu {
+namespace {
+static const int BASE = 1000; // 10^3 per limb
+static const int BASE_DIG = 3;
 
-// Private constants
-static const int BASE = 1000000000;  // 10^9
-static const int BASE_DIGITS = 9;    // Number of digits per base element
-
-// Helper function to remove leading zeros
-static void remove_leading_zeros(std::vector<int>& digits) {
-    while (!digits.empty() && digits.back() == 0) {
-        digits.pop_back();
-    }
+inline void trim(std::vector<int> &a) {
+  while (!a.empty() && a.back() == 0) a.pop_back();
+}
+inline int cmp_vec(const std::vector<int> &a, const std::vector<int> &b) {
+  if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+  for (int i=(int)a.size()-1;i>=0;--i) if (a[i]!=b[i]) return a[i]<b[i]?-1:1;
+  return 0;
+}
+inline std::vector<int> add_vec(const std::vector<int> &a, const std::vector<int> &b) {
+  std::vector<int> r; r.resize(std::max(a.size(), b.size()) + 1, 0);
+  int carry=0; size_t i=0;
+  for (; i<r.size(); ++i) {
+    long long s = carry;
+    if (i<a.size()) s += a[i];
+    if (i<b.size()) s += b[i];
+    r[i] = (int)(s % BASE);
+    carry = (int)(s / BASE);
+    if (i>=a.size() && i>=b.size() && carry==0) break;
+  }
+  r.resize(i+1); trim(r); return r;
+}
+inline std::vector<int> sub_vec(const std::vector<int> &a, const std::vector<int> &b) { // assume a>=b
+  std::vector<int> r; r.resize(a.size());
+  int carry=0;
+  for (size_t i=0;i<a.size();++i) {
+    long long cur = (long long)a[i] - carry - (i<b.size()?b[i]:0);
+    if (cur<0) { cur += BASE; carry=1; } else carry=0;
+    r[i] = (int)cur;
+  }
+  trim(r); return r;
 }
 
-// Helper function to compare absolute values
-static int compare_absolute(const std::vector<int>& a, const std::vector<int>& b) {
-    if (a.size() != b.size()) {
-        return a.size() < b.size() ? -1 : 1;
+using cd = std::complex<double>;
+inline void fft(std::vector<cd> &a, bool invert) {
+  int n = (int)a.size();
+  static std::vector<int> rev; static std::vector<cd> roots{cd(0,0), cd(1,0)};
+  if ((int)rev.size() != n) {
+    int k = 0; while ((1<<k) < n) ++k;
+    rev.assign(n,0);
+    for (int i=0;i<n;i++) rev[i] = (rev[i>>1]>>1) | ((i&1)<<(k-1));
+  }
+  if ((int)roots.size() < n) {
+    int k = 1; while ((1<<k) < (int)roots.size()) ++k;
+    roots.resize(n);
+    const double PI = 3.141592653589793238462643383279502884;
+    for (; (1<<k) < n; ++k) {
+      double ang = 2 * PI / (1<<(k+1));
+      for (int i=1<<(k-1); i<(1<<k); ++i) {
+        roots[2*i] = roots[i];
+        roots[2*i+1] = std::polar(1.0, ang*(2*i+1-(1<<k)));
+      }
     }
-    for (int i = a.size() - 1; i >= 0; --i) {
-        if (a[i] != b[i]) {
-            return a[i] < b[i] ? -1 : 1;
-        }
+  }
+  for (int i=0;i<n;i++) if (i<rev[i]) std::swap(a[i], a[rev[i]]);
+  for (int len=1; len<n; len<<=1) {
+    for (int i=0; i<n; i+=2*len) {
+      for (int j=0;j<len;++j) {
+        cd z = a[i+j+len] * roots[j+len];
+        a[i+j+len] = a[i+j] - z;
+        a[i+j] += z;
+      }
     }
-    return 0;
+  }
+  if (invert) {
+    for (int l=1, r=n-1; l<r; ++l, --r) { auto tmp=a[l]; a[l]=a[r]; a[r]=tmp; }
+    for (int i=0;i<n;i++) a[i] /= n;
+  }
 }
-
-// Helper function for absolute addition
-static std::vector<int> add_absolute(const std::vector<int>& a, const std::vector<int>& b) {
-    std::vector<int> result;
-    int carry = 0;
-    int max_size = std::max(a.size(), b.size());
-    
-    for (int i = 0; i < max_size || carry; ++i) {
-        int sum = carry;
-        if (i < a.size()) sum += a[i];
-        if (i < b.size()) sum += b[i];
-        result.push_back(sum % BASE);
-        carry = sum / BASE;
+inline std::vector<int> multiply_fft(const std::vector<int> &a, const std::vector<int> &b) {
+  if (a.empty() || b.empty()) return {};
+  if (std::min(a.size(), b.size()) < 32) {
+    std::vector<long long> tmp(a.size()+b.size(), 0);
+    for (size_t i=0;i<a.size();++i) {
+      long long carry=0;
+      for (size_t j=0;j<b.size()||carry;++j) {
+        long long cur = tmp[i+j] + carry + 1LL*a[i]*(j<b.size()?b[j]:0);
+        tmp[i+j] = cur % BASE; carry = cur / BASE;
+      }
     }
-    
-    return result;
+    std::vector<int> res; res.reserve(tmp.size());
+    for (auto v: tmp) res.push_back((int)v);
+    trim(res); return res;
+  }
+  int n=1; while (n < (int)a.size() + (int)b.size()) n <<= 1;
+  std::vector<cd> fa(n), fb(n);
+  for (size_t i=0;i<a.size();++i) fa[i] = a[i];
+  for (size_t i=0;i<b.size();++i) fb[i] = b[i];
+  fft(fa, false); fft(fb, false);
+  for (int i=0;i<n;i++) fa[i] *= fb[i];
+  fft(fa, true);
+  std::vector<int> res(n);
+  long long carry=0;
+  for (int i=0;i<n;i++) {
+    double val = fa[i].real();
+    long long t = (long long)(val + (val >= 0 ? 0.5 : -0.5)) + carry;
+    res[i] = (int)(t % BASE);
+    carry = t / BASE;
+  }
+  while (carry) { res.push_back((int)(carry % BASE)); carry/=BASE; }
+  trim(res); return res;
 }
-
-// Helper function for absolute subtraction (assumes |a| >= |b|)
-static std::vector<int> subtract_absolute(const std::vector<int>& a, const std::vector<int>& b) {
-    std::vector<int> result;
-    int borrow = 0;
-    
-    for (int i = 0; i < a.size(); ++i) {
-        int diff = a[i] - borrow;
-        if (i < b.size()) diff -= b[i];
-        
-        if (diff < 0) {
-            diff += BASE;
-            borrow = 1;
-        } else {
-            borrow = 0;
-        }
-        
-        result.push_back(diff);
-    }
-    
-    remove_leading_zeros(result);
-    return result;
+inline void mul_small_inplace(std::vector<int> &a, int m) {
+  long long carry=0;
+  for (size_t i=0;i<a.size();++i) {
+    long long cur = 1LL*a[i]*m + carry;
+    a[i] = (int)(cur % BASE); carry = cur / BASE;
+  }
+  if (carry) a.push_back((int)carry);
+  trim(a);
 }
-
-// Helper function for absolute multiplication
-static std::vector<int> multiply_absolute(const std::vector<int>& a, const std::vector<int>& b) {
-    if (a.empty() || b.empty()) {
-        return std::vector<int>();
-    }
-    
-    std::vector<int> result(a.size() + b.size(), 0);
-    
-    for (int i = 0; i < a.size(); ++i) {
-        long long carry = 0;
-        for (int j = 0; j < b.size() || carry; ++j) {
-            long long product = result[i + j] + carry;
-            if (j < b.size()) {
-                product += (long long)a[i] * b[j];
-            }
-            result[i + j] = product % BASE;
-            carry = product / BASE;
-        }
-    }
-    
-    remove_leading_zeros(result);
-    return result;
-}
-
-// Helper function to compare absolute value with a base element
-static bool compare_absolute_with_base(const std::vector<int>& a, int b) {
-    if (a.empty()) return b == 0;
-    if (a.size() > 1) return true;
-    return a[0] >= b;
-}
-
-// Helper function for absolute division by single digit
-static std::vector<int> divide_absolute_by_base(const std::vector<int>& a, int b, int& remainder) {
-    std::vector<int> result;
-    remainder = 0;
-    
-    for (int i = a.size() - 1; i >= 0; --i) {
-        long long current = (long long)remainder * BASE + a[i];
-        result.push_back(current / b);
-        remainder = current % b;
-    }
-    
-    std::reverse(result.begin(), result.end());
-    remove_leading_zeros(result);
-    return result;
-}
-
-// Helper function for absolute division using binary search
-static std::vector<int> divide_absolute(const std::vector<int>& a, const std::vector<int>& b, std::vector<int>& remainder) {
-    if (b.empty()) {
-        // Division by zero - undefined behavior as per requirements
-        return std::vector<int>();
-    }
-    
-    if (a.size() < b.size() || (a.size() == b.size() && compare_absolute(a, b) < 0)) {
-        remainder = a;
-        return std::vector<int>();
-    }
-    
-    // Binary search for quotient
-    std::vector<int> low, high, mid, result;
-    low.push_back(0);
-    high = a;
-    
-    // Find upper bound by doubling
-    while (true) {
-        std::vector<int> product = multiply_absolute(high, b);
-        if (compare_absolute(product, a) > 0) {
-            break;
-        }
-        low = high;
-        // Double high
-        int carry = 0;
-        for (int i = 0; i < high.size() || carry; ++i) {
-            if (i < high.size()) {
-                carry += high[i] * 2;
-                high[i] = carry % BASE;
-            } else {
-                high.push_back(carry % BASE);
-            }
-            carry /= BASE;
-        }
-    }
-    
-    // Binary search
-    while (compare_absolute(low, high) <= 0) {
-        // mid = (low + high) / 2
-        std::vector<int> sum = add_absolute(low, high);
-        int rem;
-        mid = divide_absolute_by_base(sum, 2, rem);
-        
-        std::vector<int> product = multiply_absolute(mid, b);
-        int cmp = compare_absolute(product, a);
-        
-        if (cmp <= 0) {
-            result = mid;
-            low = add_absolute(mid, std::vector<int>(1, 1));
-        } else {
-            high = subtract_absolute(mid, std::vector<int>(1, 1));
-        }
-    }
-    
-    remainder = subtract_absolute(a, multiply_absolute(result, b));
-    return result;
 }
 
 // Constructors
-int2048::int2048() : sign(true) {}
-
-int2048::int2048(long long value) : sign(value >= 0) {
-    if (value == 0) {
-        digits.clear();
-        return;
-    }
-    
-    unsigned long long abs_value = sign ? value : -value;
-    while (abs_value > 0) {
-        digits.push_back(abs_value % BASE);
-        abs_value /= BASE;
-    }
+int2048::int2048() : neg(false) {}
+int2048::int2048(long long v) : neg(false) {
+  if (v<0) { neg=true; v = -v; }
+  unsigned long long t = (unsigned long long)v;
+  while (t) { d.push_back((int)(t % BASE)); t /= BASE; }
 }
+int2048::int2048(const std::string &s) : neg(false) { read(s); }
+int2048::int2048(const int2048 &o) : neg(o.neg), d(o.d) {}
 
-int2048::int2048(const std::string& str) {
-    read(str);
-}
-
-int2048::int2048(const int2048& other) : sign(other.sign), digits(other.digits) {}
-
-// Basic operations
-void int2048::read(const std::string& str) {
-    digits.clear();
-    sign = true;
-    
-    int start = 0;
-    if (str[0] == '-') {
-        sign = false;
-        start = 1;
-    } else if (str[0] == '+') {
-        start = 1;
-    }
-    
-    // Process digits from right to left
-    for (int i = str.length() - 1; i >= start; i -= BASE_DIGITS) {
-        int block_start = std::max(start, i - BASE_DIGITS + 1);
-        std::string block = str.substr(block_start, i - block_start + 1);
-        digits.push_back(std::stoi(block));
-    }
-    
-    remove_leading_zeros(digits);
-    if (digits.empty()) {
-        sign = true;  // Zero is always positive
-    }
+void int2048::read(const std::string &s) {
+  neg=false; d.clear();
+  int i=0; while (i<(int)s.size() && (unsigned char)s[i] <= ' ') ++i;
+  bool n=false; if (i<(int)s.size() && (s[i]=='+'||s[i]=='-')) { n = s[i]=='-'; ++i; }
+  while (i<(int)s.size() && s[i]=='0') ++i;
+  std::vector<int> chunks; chunks.reserve((s.size()-i+BASE_DIG-1)/BASE_DIG);
+  for (int j=(int)s.size(); j>i; j-=BASE_DIG) {
+    int l = j-BASE_DIG; if (l<i) l=i;
+    int val=0; for (int k=l;k<j;++k) val = val*10 + (s[k]-'0');
+    chunks.push_back(val);
+  }
+  d.swap(chunks); trim(d); neg = n && !d.empty();
 }
 
 void int2048::print() {
-    if (digits.empty()) {
-        std::cout << "0";
-        return;
+  if (d.empty()) { std::cout << 0; return; }
+  if (neg) std::cout << '-';
+  std::cout << d.back();
+  for (int i=(int)d.size()-2;i>=0;--i) {
+    int v=d[i];
+    if (v<100) { if (v<10) std::cout << "00"; else std::cout << '0'; }
+    std::cout << v;
+  }
+}
+
+int2048 &int2048::add(const int2048 &b) { return (*this += b); }
+int2048 add(int2048 a, const int2048 &b) { a += b; return a; }
+int2048 &int2048::minus(const int2048 &b) { return (*this -= b); }
+int2048 minus(int2048 a, const int2048 &b) { a -= b; return a; }
+
+int2048 int2048::operator+() const { return *this; }
+int2048 int2048::operator-() const { int2048 r(*this); if (!r.d.empty()) r.neg = !r.neg; return r; }
+
+int2048 &int2048::operator=(const int2048 &o) { if (this!=&o) { neg=o.neg; d=o.d; } return *this; }
+
+int2048 &int2048::operator+=(const int2048 &b) {
+  if (neg == b.neg) { d = add_vec(d, b.d); }
+  else {
+    int c = cmp_vec(d, b.d);
+    if (c==0) { d.clear(); neg=false; }
+    else if (c>0) { d = sub_vec(d, b.d); }
+    else { auto t = sub_vec(b.d, d); d.swap(t); neg = b.neg; }
+  }
+  if (d.empty()) neg=false; return *this;
+}
+int2048 operator+(int2048 a, const int2048 &b) { a += b; return a; }
+
+int2048 &int2048::operator-=(const int2048 &b) {
+  int2048 nb = b; if (!nb.d.empty()) nb.neg = !nb.neg; *this += nb; return *this;
+}
+int2048 operator-(int2048 a, const int2048 &b) { a -= b; return a; }
+
+int2048 &int2048::operator*=(const int2048 &b) {
+  if (d.empty() || b.d.empty()) { d.clear(); neg=false; return *this; }
+  d = multiply_fft(d, b.d); neg = (neg ^ b.neg); if (d.empty()) neg=false; return *this;
+}
+int2048 operator*(int2048 a, const int2048 &b) { a *= b; return a; }
+
+static void divmod_abs_vec(const std::vector<int> &a, const std::vector<int> &b, std::vector<int> &q, std::vector<int> &r) {
+  r.clear(); q.assign(a.size(), 0);
+  if (b.empty()) return;
+  if (cmp_vec(a,b) < 0) { r = a; q.clear(); return; }
+  r.clear();
+  for (int i=(int)a.size()-1; i>=0; --i) {
+    // r = r * BASE + a[i]  (shift by one limb and insert a[i] at lowest position)
+    r.insert(r.begin(), a[i]);
+    trim(r);
+    int low=0, high=BASE-1, best=0;
+    while (low<=high) {
+      int mid=(low+high)>>1;
+      std::vector<int> prod = b; mul_small_inplace(prod, mid);
+      int cmp = cmp_vec(prod, r);
+      if (cmp<=0) { best=mid; low=mid+1; }
+      else high=mid-1;
     }
-    
-    if (!sign) {
-        std::cout << "-";
+    q[i] = best;
+    if (best) {
+      std::vector<int> prod = b; mul_small_inplace(prod, best);
+      // r -= prod
+      int carry2=0;
+      for (size_t j=0;j<r.size();++j) {
+        long long cur = (long long)r[j] - (j<prod.size()?prod[j]:0) - carry2;
+        if (cur<0) { cur += BASE; carry2=1; } else carry2=0;
+        r[j] = (int)cur;
+      }
+      trim(r);
     }
-    
-    std::cout << digits.back();
-    for (int i = digits.size() - 2; i >= 0; --i) {
-        std::cout.width(BASE_DIGITS);
-        std::cout.fill('0');
-        std::cout << digits[i];
+  }
+  trim(q); trim(r);
+}
+
+int2048 &int2048::operator/=(const int2048 &b) {
+  if (b.d.empty()) return *this; // undefined
+  std::vector<int> q,rvec; std::vector<int> aa=d, bb=b.d;
+  divmod_abs_vec(aa, bb, q, rvec);
+  bool same = (neg == b.neg);
+  if (!same && !rvec.empty()) {
+    // floor adjustment for negative result with non-zero remainder
+    int carry=1; for (size_t i=0;i<q.size()||carry;++i) {
+      if (i==q.size()) q.push_back(0);
+      int cur = q[i] + carry; if (cur>=BASE) { q[i]=cur-BASE; carry=1; } else { q[i]=cur; carry=0; }
     }
+  }
+  d.swap(q); neg = (!same && !d.empty()); if (d.empty()) neg=false; return *this;
+}
+int2048 operator/(int2048 a, const int2048 &b) { a /= b; return a; }
+
+int2048 &int2048::operator%=(const int2048 &b) {
+  int2048 q = (*this) / b;
+  int2048 t = q * b;
+  *this -= t;
+  return *this;
+}
+int2048 operator%(int2048 a, const int2048 &b) { a %= b; return a; }
+
+std::istream &operator>>(std::istream &is, int2048 &x) {
+  std::string s; is >> s; x.read(s); return is;
+}
+std::ostream &operator<<(std::ostream &os, const int2048 &x) {
+  if (x.d.empty()) { os << 0; return os; }
+  if (x.neg) os << '-';
+  os << x.d.back();
+  for (int i=(int)x.d.size()-2;i>=0;--i) {
+    int v = x.d[i];
+    if (v<100) { if (v<10) os << "00"; else os << '0'; }
+    os << v;
+  }
+  return os;
 }
 
-int2048& int2048::add(const int2048& other) {
-    if (sign == other.sign) {
-        // Same sign: add absolute values
-        digits = add_absolute(digits, other.digits);
-    } else {
-        // Different signs: subtract smaller absolute value from larger
-        int cmp = compare_absolute(digits, other.digits);
-        if (cmp >= 0) {
-            digits = subtract_absolute(digits, other.digits);
-            // sign remains the same
-        } else {
-            digits = subtract_absolute(other.digits, digits);
-            sign = !sign;
-        }
-    }
-    
-    if (digits.empty()) {
-        sign = true;  // Zero is always positive
-    }
-    
-    return *this;
+bool operator==(const int2048 &a, const int2048 &b) {
+  if (a.neg != b.neg) return a.d.empty() && b.d.empty();
+  return a.d == b.d;
 }
-
-int2048 add(int2048 a, const int2048& b) {
-    return a.add(b);
+bool operator!=(const int2048 &a, const int2048 &b) { return !(a==b); }
+bool operator<(const int2048 &a, const int2048 &b) {
+  if (a.neg != b.neg) return a.neg && !a.d.empty();
+  int cmp = cmp_vec(a.d, b.d);
+  return a.neg ? (cmp>0) : (cmp<0);
 }
-
-int2048& int2048::minus(const int2048& other) {
-    int2048 neg_other = other;
-    neg_other.sign = !other.sign;
-    return add(neg_other);
-}
-
-int2048 minus(int2048 a, const int2048& b) {
-    return a.minus(b);
-}
-
-// Comparison operators
-bool operator==(const int2048& a, const int2048& b) {
-    if (a.sign != b.sign) {
-        return false;
-    }
-    return compare_absolute(a.digits, b.digits) == 0;
-}
-
-bool operator!=(const int2048& a, const int2048& b) {
-    return !(a == b);
-}
-
-bool operator<(const int2048& a, const int2048& b) {
-    if (a.sign != b.sign) {
-        return !a.sign && b.sign;  // negative < positive
-    }
-    if (!a.sign && !b.sign) {
-        // Both negative: compare absolute values in reverse
-        return compare_absolute(a.digits, b.digits) > 0;
-    }
-    // Both positive: compare absolute values normally
-    return compare_absolute(a.digits, b.digits) < 0;
-}
-
-bool operator>(const int2048& a, const int2048& b) {
-    return b < a;
-}
-
-bool operator<=(const int2048& a, const int2048& b) {
-    return !(a > b);
-}
-
-bool operator>=(const int2048& a, const int2048& b) {
-    return !(a < b);
-}
-
-// Unary operators
-int2048 int2048::operator+() const {
-    return *this;
-}
-
-int2048 int2048::operator-() const {
-    int2048 result = *this;
-    if (!result.digits.empty()) {
-        result.sign = !result.sign;
-    }
-    return result;
-}
-
-// Assignment operator
-int2048& int2048::operator=(const int2048& other) {
-    if (this != &other) {
-        sign = other.sign;
-        digits = other.digits;
-    }
-    return *this;
-}
-
-// Compound assignment operators
-int2048& int2048::operator+=(const int2048& other) {
-    return add(other);
-}
-
-int2048& int2048::operator-=(const int2048& other) {
-    return minus(other);
-}
-
-int2048& int2048::operator*=(const int2048& other) {
-    if (digits.empty() || other.digits.empty()) {
-        digits.clear();
-        sign = true;
-        return *this;
-    }
-    
-    digits = multiply_absolute(digits, other.digits);
-    sign = (sign == other.sign);
-    
-    if (digits.empty()) {
-        sign = true;
-    }
-    
-    return *this;
-}
-
-int2048& int2048::operator/=(const int2048& other) {
-    if (other.digits.empty()) {
-        // Division by zero - undefined behavior as per requirements
-        return *this;
-    }
-    
-    if (digits.empty()) {
-        return *this;
-    }
-    
-    std::vector<int> remainder;
-    digits = divide_absolute(digits, other.digits, remainder);
-    
-    // Determine the sign of the result
-    bool result_sign = (sign == other.sign);
-    
-    // Handle floor division for negative numbers
-    if (!result_sign && !remainder.empty()) {
-        // If result should be negative and there's a remainder, we need to add 1
-        // to implement floor division (round toward negative infinity)
-        // Example: -10 / 3 = -3.333... → floor = -4, so we need |quotient| + 1
-        digits = add_absolute(digits, std::vector<int>(1, 1));
-    }
-    
-    sign = result_sign;
-    
-    if (digits.empty()) {
-        sign = true;
-    }
-    
-    return *this;
-}
-
-int2048& int2048::operator%=(const int2048& other) {
-    if (other.digits.empty()) {
-        // Division by zero - undefined behavior as per requirements
-        return *this;
-    }
-    
-    if (digits.empty()) {
-        return *this;
-    }
-    
-    std::vector<int> quotient, remainder;
-    quotient = divide_absolute(digits, other.digits, remainder);
-    digits = remainder;
-    
-    // Handle modulo for negative numbers: x % y = x - (x / y) * y
-    // Since we implemented floor division, this should work correctly
-    if (digits.empty()) {
-        sign = true;
-    }
-    
-    return *this;
-}
-
-// Binary arithmetic operators
-int2048 operator+(int2048 a, const int2048& b) {
-    return a += b;
-}
-
-int2048 operator-(int2048 a, const int2048& b) {
-    return a -= b;
-}
-
-int2048 operator*(int2048 a, const int2048& b) {
-    return a *= b;
-}
-
-int2048 operator/(int2048 a, const int2048& b) {
-    return a /= b;
-}
-
-int2048 operator%(int2048 a, const int2048& b) {
-    return a %= b;
-}
-
-// Stream operators
-std::istream& operator>>(std::istream& is, sjtu::int2048& num) {
-    std::string str;
-    is >> str;
-    num.read(str);
-    return is;
-}
-
-std::ostream& operator<<(std::ostream& os, const sjtu::int2048& num) {
-    if (num.digits.empty()) {
-        os << "0";
-        return os;
-    }
-    
-    if (!num.sign) {
-        os << "-";
-    }
-    
-    os << num.digits.back();
-    for (int i = num.digits.size() - 2; i >= 0; --i) {
-        os.width(9);
-        os.fill('0');
-        os << num.digits[i];
-    }
-    
-    return os;
-}
+bool operator>(const int2048 &a, const int2048 &b) { return b<a; }
+bool operator<=(const int2048 &a, const int2048 &b) { return !(b<a); }
+bool operator>=(const int2048 &a, const int2048 &b) { return !(a<b); }
 
 } // namespace sjtu

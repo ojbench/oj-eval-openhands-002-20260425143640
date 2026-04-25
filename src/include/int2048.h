@@ -14,15 +14,15 @@
 #include <cstring>
 #include <iostream>
 #include <vector>
+#include <string>
 
 // Do not use "using namespace std;"
 
 namespace sjtu {
 class int2048 {
 private:
-  bool sign;           // true for positive, false for negative
-  std::vector<int> digits;  // digits in base 10^9, little-endian
-  
+  bool neg;              // sign flag, false for >=0
+  std::vector<int> d;    // little-endian digits in base 1000
 public:
   // Constructors
   int2048();
