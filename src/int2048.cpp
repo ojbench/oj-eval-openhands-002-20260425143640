@@ -115,7 +115,7 @@ static std::vector<int> divide_absolute_by_base(const std::vector<int>& a, int b
     return result;
 }
 
-// Helper function for absolute division using long division
+// Helper function for absolute division using binary search
 static std::vector<int> divide_absolute(const std::vector<int>& a, const std::vector<int>& b, std::vector<int>& remainder) {
     if (b.empty()) {
         // Division by zero - undefined behavior as per requirements
@@ -127,18 +127,51 @@ static std::vector<int> divide_absolute(const std::vector<int>& a, const std::ve
         return std::vector<int>();
     }
     
-    // Start with quotient = 0
-    std::vector<int> quotient;
-    remainder = a;
+    // Binary search for quotient
+    std::vector<int> low, high, mid, result;
+    low.push_back(0);
+    high = a;
     
-    // Simple repeated subtraction (not efficient but correct for small cases)
-    // For better performance, we'd need a more sophisticated algorithm
-    while (compare_absolute(remainder, b) >= 0) {
-        remainder = subtract_absolute(remainder, b);
-        quotient = add_absolute(quotient, std::vector<int>(1, 1));
+    // Find upper bound by doubling
+    while (true) {
+        std::vector<int> product = multiply_absolute(high, b);
+        if (compare_absolute(product, a) > 0) {
+            break;
+        }
+        low = high;
+        // Double high
+        int carry = 0;
+        for (int i = 0; i < high.size() || carry; ++i) {
+            if (i < high.size()) {
+                carry += high[i] * 2;
+                high[i] = carry % BASE;
+            } else {
+                high.push_back(carry % BASE);
+            }
+            carry /= BASE;
+        }
     }
     
-    return quotient;
+    // Binary search
+    while (compare_absolute(low, high) <= 0) {
+        // mid = (low + high) / 2
+        std::vector<int> sum = add_absolute(low, high);
+        int rem;
+        mid = divide_absolute_by_base(sum, 2, rem);
+        
+        std::vector<int> product = multiply_absolute(mid, b);
+        int cmp = compare_absolute(product, a);
+        
+        if (cmp <= 0) {
+            result = mid;
+            low = add_absolute(mid, std::vector<int>(1, 1));
+        } else {
+            high = subtract_absolute(mid, std::vector<int>(1, 1));
+        }
+    }
+    
+    remainder = subtract_absolute(a, multiply_absolute(result, b));
+    return result;
 }
 
 // Constructors
